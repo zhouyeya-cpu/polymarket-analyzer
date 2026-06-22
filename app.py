@@ -177,8 +177,14 @@ def summarize_trades(trades):
 # ============================================================
 # DeepSeek 调用
 # ============================================================
+import httpx
+
 def call_deepseek(api_key, messages, max_retries=3):
-    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    # 创建不代理的 httpx 客户端，解决 proxies 参数报错
+    http_client = httpx.Client(proxies=None, timeout=60.0)
+    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", http_client=http_client)
+    
+    # 其余代码保持你原来的写法（包含 response_format）
     last_error = None
     for attempt in range(1, max_retries+1):
         try:
@@ -383,12 +389,27 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+import re
+
+def extract_slug(input_str):
+    if 'polymarket.com' in input_str:
+        match = re.search(r'/event/([^?#]+)', input_str)
+        if match:
+            return match.group(1).strip('/')
+        return input_str.rstrip('/').split('/')[-1]
+    return input_str
+
+# 在 analyze 中调用：
+raw_slug = data.get('event_slug')
+event_slug = extract_slug(raw_slug)
+
 @app.route('/analyze', methods=['POST'])
 def analyze():
     data = request.get_json()
     deepseek_key = data.get('deepseek_key')
     news_token = data.get('news_token')
-    event_slug = data.get('event_slug')
+    raw_slug = data.get('event_slug')
+    event_slug = extract_slug(raw_slug)
     target_price = float(data.get('target_price', 0.60))
 
     if not deepseek_key or not news_token or not event_slug:
