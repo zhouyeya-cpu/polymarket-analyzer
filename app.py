@@ -1,8 +1,8 @@
 import os
 import json
 import re
+import openai  # 使用旧版 openai（0.28.x）
 from flask import Flask, request, render_template_string, jsonify
-from openai import OpenAI
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -24,23 +24,43 @@ def build_session():
 SESSION = build_session()
 
 # ============================================================
+# 工具函数：从输入中提取 Polymarket Slug
+# ============================================================
+def extract_slug(input_str):
+    """自动从完整 URL 或直接 slug 中提取事件标识符"""
+    if not input_str:
+        return ""
+    if 'polymarket.com' in input_str:
+        # 匹配 /event/ 后面的部分，直到遇到 ? 或 #
+        match = re.search(r'/event/([^?#]+)', input_str)
+        if match:
+            return match.group(1).strip('/')
+        # 如果没有 /event/，则取最后一段
+        return input_str.rstrip('/').split('/')[-1]
+    # 如果已经是纯 slug，直接返回
+    return input_str
+
+# ============================================================
 # 新闻 API
 # ============================================================
 def get_news(token, theme="iran-me", window="7d", limit=100, q=None):
     url = "https://news.ruilisi.com/api/v1/news"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"theme": theme, "window": window, "limit": limit}
-    if q: params["q"] = q
+    if q:
+        params["q"] = q
     resp = SESSION.get(url, headers=headers, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 def format_news_for_prompt(news, max_items=25):
     items = news.get("items", [])
-    if not isinstance(items, list): return "新闻数据格式异常"
+    if not isinstance(items, list):
+        return "新闻数据格式异常"
     formatted = []
     for i, item in enumerate(items[:max_items], start=1):
-        if not isinstance(item, dict): continue
+        if not isinstance(item, dict):
+            continue
         title = item.get("title") or item.get("title_zh") or item.get("title_en") or "无标题"
         source = item.get("source") or item.get("source_name") or "未知来源"
         published_at = item.get("published_at") or item.get("publishedAt") or "未知时间"
@@ -94,18 +114,22 @@ def get_trade_history(condition_id, limit=500):
 # 数据摘要函数（全动态适配目标价）
 # ============================================================
 def safe_float(x):
-    try: return float(x)
-    except: return None
+    try:
+        return float(x)
+    except:
+        return None
 
 def summarize_orderbook(bids, asks, target_price, top_n=10):
     bid_levels = []
     for b in bids:
         p, s = safe_float(b.get("price")), safe_float(b.get("size"))
-        if p is not None and s is not None: bid_levels.append({"price": p, "size": s, "notional": p*s})
+        if p is not None and s is not None:
+            bid_levels.append({"price": p, "size": s, "notional": p*s})
     ask_levels = []
     for a in asks:
         p, s = safe_float(a.get("price")), safe_float(a.get("size"))
-        if p is not None and s is not None: ask_levels.append({"price": p, "size": s, "notional": p*s})
+        if p is not None and s is not None:
+            ask_levels.append({"price": p, "size": s, "notional": p*s})
     
     bid_levels_sorted = sorted(bid_levels, key=lambda x: x["price"], reverse=True)
     ask_levels_sorted = sorted(ask_levels, key=lambda x: x["price"])
@@ -119,9 +143,13 @@ def summarize_orderbook(bids, asks, target_price, top_n=10):
     shares_to_target = sum(x["size"] for x in ask_until_target)
     
     return {
-        "best_bid": best_bid, "best_ask": best_ask, "spread": spread,
-        "bid_levels": len(bid_levels_sorted), "ask_levels": len(ask_levels_sorted),
-        "top_bids": bid_levels_sorted[:top_n], "top_asks": ask_levels_sorted[:top_n],
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread": spread,
+        "bid_levels": len(bid_levels_sorted),
+        "ask_levels": len(ask_levels_sorted),
+        "top_bids": bid_levels_sorted[:top_n],
+        "top_asks": ask_levels_sorted[:top_n],
         "total_bid_size_top": sum(x["size"] for x in bid_levels_sorted[:top_n]),
         "total_ask_size_top": sum(x["size"] for x in ask_levels_sorted[:top_n]),
         "ask_size_until_target": shares_to_target,
@@ -130,17 +158,24 @@ def summarize_orderbook(bids, asks, target_price, top_n=10):
     }
 
 def summarize_price_history(price_history, target_price):
-    if not price_history: return {"count": 0, "latest_price": None, "ever_reached_target": False}
+    if not price_history:
+        return {"count": 0, "latest_price": None, "ever_reached_target": False}
     prices = []
     for row in price_history:
-        try: prices.append({"t": row.get("t"), "p": float(row.get("p"))})
-        except: continue
-    if not prices: return {"count": len(price_history), "latest_price": None, "ever_reached_target": False}
+        try:
+            prices.append({"t": row.get("t"), "p": float(row.get("p"))})
+        except:
+            continue
+    if not prices:
+        return {"count": len(price_history), "latest_price": None, "ever_reached_target": False}
     first, latest = prices[0]["p"], prices[-1]["p"]
     min_p, max_p = min(x["p"] for x in prices), max(x["p"] for x in prices)
     return {
-        "count": len(prices), "first_price": first, "latest_price": latest,
-        "min_price": min_p, "max_price": max_p,
+        "count": len(prices),
+        "first_price": first,
+        "latest_price": latest,
+        "min_price": min_p,
+        "max_price": max_p,
         "change_abs": latest - first,
         "change_pct": ((latest / first - 1) * 100) if first else None,
         "ever_reached_target": max_p >= target_price,
@@ -150,7 +185,8 @@ def summarize_price_history(price_history, target_price):
     }
 
 def summarize_trades(trades):
-    if not trades: return {"count": 0, "recent_trades": []}
+    if not trades:
+        return {"count": 0, "recent_trades": []}
     yes_trades, no_trades, large_trades = [], [], []
     yes_size, no_size, total_size = 0, 0, 0
     yes_price_size_sum, no_price_size_sum = 0, 0
@@ -159,37 +195,54 @@ def summarize_trades(trades):
             outcome = str(t.get("outcome", "")).lower()
             price, size = float(t.get("price", 0)), float(t.get("size", 0))
             total_size += size
-            item = {"timestamp": t.get("timestamp"), "outcome": outcome, "side": t.get("side"), "price": price, "size": size, "notional": price*size}
-            if price*size >= 500: large_trades.append(item)
+            item = {
+                "timestamp": t.get("timestamp"),
+                "outcome": outcome,
+                "side": t.get("side"),
+                "price": price,
+                "size": size,
+                "notional": price*size
+            }
+            if price*size >= 500:
+                large_trades.append(item)
             if outcome == "yes":
-                yes_trades.append(item); yes_size += size; yes_price_size_sum += price*size
+                yes_trades.append(item)
+                yes_size += size
+                yes_price_size_sum += price*size
             elif outcome == "no":
-                no_trades.append(item); no_size += size; no_price_size_sum += price*size
-        except: continue
+                no_trades.append(item)
+                no_size += size
+                no_price_size_sum += price*size
+        except:
+            continue
     return {
-        "count": len(trades), "yes_trade_count": len(yes_trades), "no_trade_count": len(no_trades),
-        "total_size": total_size, "yes_size": yes_size, "no_size": no_size,
+        "count": len(trades),
+        "yes_trade_count": len(yes_trades),
+        "no_trade_count": len(no_trades),
+        "total_size": total_size,
+        "yes_size": yes_size,
+        "no_size": no_size,
         "yes_vwap": yes_price_size_sum/yes_size if yes_size>0 else None,
         "no_vwap": no_price_size_sum/no_size if no_size>0 else None,
-        "large_trades": large_trades[-20:], "recent_trades": trades[-120:]
+        "large_trades": large_trades[-20:],
+        "recent_trades": trades[-120:]
     }
 
 # ============================================================
-# DeepSeek 调用
+# DeepSeek 调用（适配旧版 openai）
 # ============================================================
-import httpx
-
 def call_deepseek(api_key, messages, max_retries=3):
-    # 创建不代理的 httpx 客户端，解决 proxies 参数报错
-    http_client = httpx.Client(proxies=None, timeout=60.0)
-    client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com", http_client=http_client)
-    
-    # 其余代码保持你原来的写法（包含 response_format）
+    openai.api_key = api_key
+    openai.base_url = "https://api.deepseek.com"   # 旧版用 api_base 也可以
+    # 如果上述无效，可以改为 openai.api_base = "https://api.deepseek.com"
     last_error = None
     for attempt in range(1, max_retries+1):
         try:
-            response = client.chat.completions.create(
-                model="deepseek-chat", messages=messages, temperature=0.15, max_tokens=7000, response_format={"type": "json_object"}
+            response = openai.ChatCompletion.create(
+                model="deepseek-chat",
+                messages=messages,
+                temperature=0.15,
+                max_tokens=7000
             )
             final_answer = response.choices[0].message.content
             data = json.loads(final_answer)
@@ -389,31 +442,19 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
-import re
-
-def extract_slug(input_str):
-    if 'polymarket.com' in input_str:
-        match = re.search(r'/event/([^?#]+)', input_str)
-        if match:
-            return match.group(1).strip('/')
-        return input_str.rstrip('/').split('/')[-1]
-    return input_str
-
-# 在 analyze 中调用：
-raw_slug = data.get('event_slug')
-event_slug = extract_slug(raw_slug)
-
 @app.route('/analyze', methods=['POST'])
 def analyze():
     data = request.get_json()
     deepseek_key = data.get('deepseek_key')
     news_token = data.get('news_token')
     raw_slug = data.get('event_slug')
-    event_slug = extract_slug(raw_slug)
     target_price = float(data.get('target_price', 0.60))
 
-    if not deepseek_key or not news_token or not event_slug:
+    if not deepseek_key or not news_token or not raw_slug:
         return jsonify({"error": "缺少必要参数"}), 400
+
+    # 自动提取 slug（如果是完整 URL）
+    event_slug = extract_slug(raw_slug)
 
     try:
         # 1. Polymarket 数据
