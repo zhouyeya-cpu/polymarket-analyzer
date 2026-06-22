@@ -229,7 +229,7 @@ def summarize_trades(trades):
 # ============================================================
 def call_deepseek(api_key, messages, max_retries=3):
     openai.api_key = api_key
-    openai.base_url = "https://api.deepseek.com"  # 旧版用 api_base 亦可
+    openai.base_url = "https://api.deepseek.com"
     last_error = None
     for attempt in range(1, max_retries+1):
         try:
@@ -252,7 +252,7 @@ def call_deepseek(api_key, messages, max_retries=3):
     raise ValueError(f"连续失败：{last_error}")
 
 # ============================================================
-# 前端 HTML（完整界面）
+# 前端 HTML（完整界面，包含新增分析维度提示）
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
