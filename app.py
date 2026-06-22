@@ -1,7 +1,7 @@
 import os
 import json
 import re
-import openai  # 使用旧版 openai（0.28.x）
+import openai  # 使用旧版 openai 0.28.x
 from flask import Flask, request, render_template_string, jsonify
 import requests
 from requests.adapters import HTTPAdapter
@@ -27,17 +27,13 @@ SESSION = build_session()
 # 工具函数：从输入中提取 Polymarket Slug
 # ============================================================
 def extract_slug(input_str):
-    """自动从完整 URL 或直接 slug 中提取事件标识符"""
     if not input_str:
         return ""
     if 'polymarket.com' in input_str:
-        # 匹配 /event/ 后面的部分，直到遇到 ? 或 #
         match = re.search(r'/event/([^?#]+)', input_str)
         if match:
             return match.group(1).strip('/')
-        # 如果没有 /event/，则取最后一段
         return input_str.rstrip('/').split('/')[-1]
-    # 如果已经是纯 slug，直接返回
     return input_str
 
 # ============================================================
@@ -233,8 +229,7 @@ def summarize_trades(trades):
 # ============================================================
 def call_deepseek(api_key, messages, max_retries=3):
     openai.api_key = api_key
-    openai.base_url = "https://api.deepseek.com"   # 旧版用 api_base 也可以
-    # 如果上述无效，可以改为 openai.api_base = "https://api.deepseek.com"
+    openai.base_url = "https://api.deepseek.com"  # 旧版用 api_base 亦可
     last_error = None
     for attempt in range(1, max_retries+1):
         try:
@@ -317,7 +312,9 @@ HTML_TEMPLATE = """
 <body>
 <div class="container">
     <h1>🎯 动态阈值预测分析器 <small style="font-size:1rem;font-weight:400;color:#6b7f98;">可自定义目标价</small></h1>
-    <div class="subtitle">输入凭证、事件 Slug 和<strong>你想要预测的目标价格</strong>（例如 0.60, 0.75, 0.90），系统将评估 Yes 价格触及该阈值的概率。</div>
+    <div class="subtitle">输入凭证、事件 Slug 和<strong>你想要预测的目标价格</strong>（例如 0.60, 0.75, 0.90），系统将评估 Yes 价格触及该阈值的概率。<br/>
+    新增分析维度：<strong>铀的运输性（进口替代）</strong> 与 <strong>铀的替代性（可再生能源替代）</strong>，全面评估事件驱动力。
+    </div>
     
     <form id="analyze-form" class="form-grid">
         <div class="form-group"><label>🔑 DeepSeek API Key</label><input type="password" id="deepseek-key" placeholder="sk-..." required /></div>
@@ -489,51 +486,231 @@ def analyze():
         except:
             news_text = "新闻获取失败"
 
-        # 6. 构建 Prompt
+        # 6. 构建 Prompt（包含新增分析维度）
         system_prompt = f"""
-你是一位预测市场分析师。核心任务：评估 Yes 价格在该市场结束前达到或超过 ${target_price} 的概率。
-注意：这不是问最终是否 Yes 结算，而是市场价格是否会涨到 >= ${target_price}。
-输出严格 JSON，包含：
+你是一位预测市场分析师，专门分析 Polymarket 二元事件市场。
+
+你的核心任务是回答：
+
+P(Yes 价格在该市场结束前达到或超过 ${target_price}) 是多少？
+
+注意：
+这不是问事件最终是否 Yes 结算。
+这是问 Yes 市场价格是否会涨到 >= ${target_price}。
+
+你必须输出严格 JSON，不要输出 Markdown，不要输出免责声明，不要输出多余解释。
+
+JSON 必须包含以下字段：
+
 {{
-  "probability_yes_reaches_target": {{ "low": 数字, "mid": 数字, "high": 数字 }},
-  "decision": {{ "action": "buy_now/wait/avoid", "reason": "", "entry_plan": "" }},
-  "price_triggers": {{ "consider_buy_below": 数字, "neutral_zone": "", "avoid_chasing_above": 数字 }},
-  "market_evidence": [ {{ "evidence": "含具体数字", "impact_on_yes_reaches_target": "positive/negative/neutral", "explanation": "至少80字" }} ],
-  "news_evidence": [ {{ "news_id": "N1", "title": "", "source": "", "published_at": "", "impact_on_yes_reaches_target": "positive/negative/neutral", "explanation": "至少100字" }} ],
-  "key_risks": [ "字符串" ],
-  "detailed_reasoning": "不少于500字",
+  "probability_yes_reaches_target": {{
+    "low": 数字,
+    "mid": 数字,
+    "high": 数字,
+    "unit": "%"
+  }},
+  "current_market": {{
+    "yes_price": 数字,
+    "no_price": 数字,
+    "volume": 数字,
+    "orderbook_summary": "字符串"
+  }},
+  "decision": {{
+    "action": "buy_now / wait / avoid / scale_in",
+    "reason": "字符串",
+    "entry_plan": "字符串"
+  }},
+  "price_triggers": {{
+    "consider_buy_below": 数字,
+    "neutral_zone": "字符串",
+    "avoid_chasing_above": 数字
+  }},
+  "market_evidence": [
+    {{
+      "evidence": "字符串，必须包含具体数字",
+      "impact_on_yes_reaches_target": "positive / negative / neutral",
+      "explanation": "字符串，至少80个中文字"
+    }}
+  ],
+  "news_evidence": [
+    {{
+      "news_id": "N1",
+      "title": "字符串",
+      "source": "字符串",
+      "published_at": "字符串",
+      "impact_on_yes_reaches_target": "positive / negative / neutral",
+      "explanation": "字符串，至少100个中文字"
+    }}
+  ],
+  "key_risks": [
+    "字符串"
+  ],
+  "detailed_reasoning": "不少于500个中文字的详细推理",
   "final_answer_one_sentence": "字符串"
 }}
-强制要求：market_evidence 至少5条，news_evidence 至少5条，必须引用 N 编号新闻。
+
+硬性要求：
+1. probability_yes_reaches_target.low/mid/high 必须存在。
+2. mid 必须是一个 0 到 100 之间的数字。
+3. market_evidence 至少包含 5 条具体市场/交易证据。
+4. market_evidence 必须引用具体数字，例如 Yes 当前价、目标价{target_price}、涨幅、最高价、最低价、spread、买卖盘档数、成交量、VWAP。
+5. news_evidence 至少包含 5 条具体新闻证据。
+6. 每条新闻证据必须引用 N 编号新闻，例如 N1、N2。
+7. 每条新闻证据必须解释它为什么提高、降低或不改变 Yes 到 {target_price} 的概率。
+8. 每条 news_evidence.explanation 至少 100 个中文字。
+9. 每条 market_evidence.explanation 至少 80 个中文字。
+10. detailed_reasoning 不少于 500 个中文字。
+11. 不允许只说“近期新闻显示”“市场情绪偏弱”“局势复杂”这种空话。
+12. 如果新闻不足以支撑判断，也必须明确说“新闻证据不足”，但仍然要给主观概率。
+13. 必须区分：
+   - 事件最终 Yes 结算概率
+   - 当前市场价格隐含概率
+   - Yes 价格触及 {target_price} 的交易概率
+14. 本次最重要的是第三项：Yes 价格触及 {target_price} 的交易概率。
+
+新增分析维度（务必在 detailed_reasoning 和新闻证据中体现）：
+- **铀的运输性（可获取性）**：伊朗是否可能通过合法或灰色渠道从周边国家（如土库曼斯坦、哈萨克斯坦、俄罗斯）进口低浓缩铀？如果存在这样的渠道，伊朗对自产高浓缩铀的依赖会降低，从而降低“高浓缩铀”事件的必要性，压低 Yes 冲高的概率。
+- **铀的替代性（能源替代）**：伊朗的核电站发电是否可被风电、太阳能、水电等可再生能源替代？如果替代方案可行且成本可控，伊朗可能减少对铀燃料的需求，从而降低坚持高浓缩铀的动力，同样降低 Yes 冲高的概率。
+
+在分析新闻时，请特别关注是否有关于伊朗寻求进口核燃料、与外国签订能源替代协议、或国内可再生能源扩张的报道。这些因素会从基本面削弱事件的驱动力。
+
+判断逻辑更新（补充）：
+- 如果新闻显示伊朗与外国达成低浓缩铀供应协议，或宣布加大可再生能源投资，则可能降低 Yes 冲到 {target_price} 的概率。
+- 如果新闻显示伊朗无法从外部获得核燃料，或可再生能源替代受阻，则可能提高 Yes 冲到 {target_price} 的概率。
 """
 
         user_message = f"""
 ## 核心问题
-P(Yes 价格 >= ${target_price})？
-当前 Yes 价格: {pm_data['yes_price']:.3f} ({pm_data['yes_price']*100:.1f}%)
-目标: ${target_price}，需上涨 {required_gain_pct:.1f}%
 
-## 市场数据
+请估计：
+
+P(Yes 价格在该市场结束前达到或超过 {target_price} 美元)
+
+当前 Yes 价格是 {pm_data['yes_price']:.3f}，也就是 {pm_data['yes_price'] * 100:.1f}%。
+目标价格是 {target_price}。
+从当前价格到 {target_price} 需要上涨约 {required_gain_pct:.1f}%。
+
+注意：
+问题不是最终是否 Yes 结算。
+问题是 Yes 市场价格是否会涨到 >= {target_price}。
+
+## 当前 Polymarket 市场数据
+
 事件: {pm_data['question']}
-总交易量: {float(pm_data.get('volume',0))}
-到期日: {pm_data.get('end_date','未知')}
+Yes 当前价格: {pm_data['yes_price']}
+No 当前价格: {pm_data['no_price']}
+总交易量: {float(pm_data.get('volume', 0))}
+到期日: {pm_data.get('end_date', '未知')}
+规则/描述: {pm_data.get('description', '无')}
 
 ## 订单簿摘要
+
 {json.dumps(orderbook_summary, ensure_ascii=False, default=str, indent=2)}
 
+请根据买卖盘深度判断：
+1. 是否容易被小额资金推到 {target_price}；
+2. {target_price} 附近是否可能有较强卖压；
+3. 当前 spread 是否说明流动性不足；
+4. 从当前价格到 {target_price} 需要多强的买盘推动。
+
 ## 历史价格摘要
+
 {json.dumps(price_history_summary, ensure_ascii=False, default=str, indent=2)}
 
+请分析：
+1. 最近价格是否有上行动能；
+2. 是否曾接近或超过 {target_price}；
+3. 当前 {pm_data['yes_price']:.3f} 到 {target_price} 需要上涨约 {required_gain_pct:.1f}%；
+4. 这种涨幅在最近历史波动中是否常见；
+5. 最近价格走势是否支持 Yes 冲到 {target_price}。
+
 ## 交易记录摘要
+
 {json.dumps(trade_summary, ensure_ascii=False, default=str, indent=2)}
 
-## 新闻证据
+请分析：
+1. 最近成交是否偏向 Yes 买入；
+2. 是否有大单推动；
+3. 成交价格是否显示市场正在重新定价；
+4. 是否存在短线投机资金推动 Yes 冲高的迹象。
+
+## 铀的运输性与替代性分析（新增）
+
+请特别注意：伊朗是否可能通过进口低浓缩铀（例如从周边国家如土库曼斯坦、哈萨克斯坦、俄罗斯）来满足国内核电站需求？如果存在这种可能性，伊朗就不必坚持自己生产高浓缩铀，这会使“伊朗结束高浓缩铀”的事件更容易发生，从而降低 Yes 冲到 {target_price} 的概率。
+
+另外，伊朗的核电站发电是否可以被可再生能源（如风电、太阳能）替代？如果替代方案可行，伊朗对铀的刚性需求会降低，同样会降低高浓缩铀的必要性，压低 Yes 冲高的概率。
+
+在分析下面的新闻时，请主动挖掘这些信息，并明确它们对 Yes 触及 {target_price} 概率的影响方向（positive/negative/neutral）。
+
+## 相关新闻证据
+
+下面每条新闻都有编号。你必须在 news_evidence 中引用这些编号，例如 N1、N2、N3。
+
 {news_text}
 
-请分析。
+请分析每条新闻对 “Yes 价格触及 {target_price}” 的影响，而不是只分析最终结算概率。
+
+判断逻辑示例：
+- 如果新闻显示伊朗愿意暂停、限制、谈判、接受核查或降低浓缩规模，则可能提高 Yes 冲到 {target_price} 的概率。
+- 如果新闻显示伊朗拒绝停止浓缩、扩大核设施、与 IAEA 对抗、美国/以色列施压升级，则可能降低 Yes 冲到 {target_price} 的概率。
+- 如果新闻只是重复旧信息、没有新政策信号，则影响中性。
+- 如果新闻可能造成短期市场情绪波动，即使最终结算概率不高，也可能提高短期触及 {target_price} 的概率。
+
+## 强制分析步骤
+
+你必须在 detailed_reasoning 中完成以下推理：
+
+1. 价格距离分析：
+   当前 Yes = {pm_data['yes_price']:.3f}。
+   目标价格 = {target_price}。
+   需要上涨 = {required_gain_pct:.1f}%。
+   请判断这个涨幅是否符合历史波动。
+
+2. 历史价格分析：
+   请使用历史价格摘要里的 first_price、latest_price、min_price、max_price、change_pct、ever_reached_target。
+   必须判断 Yes 是否曾接近 {target_price}。
+
+3. 订单簿分析：
+   请使用 best_bid、best_ask、spread、bid_levels、ask_levels、ask_size_until_target、estimated_cost_to_lift_to_target。
+   必须判断盘口是否薄，是否可能被资金推高。
+
+4. 成交分析：
+   请使用 trade_summary 里的 yes_trade_count、no_trade_count、yes_size、no_size、yes_vwap、large_trades。
+   必须判断最近成交是否支持 Yes 冲高。
+
+5. 新闻分析：
+   必须至少引用 5 条 N 编号新闻。
+   每条新闻必须说明它对 “Yes 价格触及 {target_price}” 的影响。
+
+6. 铀的运输性与替代性分析（新增）：
+   结合新闻中的信息，判断伊朗是否存在外部获取低浓缩铀的渠道，或是否有可再生能源替代的迹象。
+   这些因素会降低高浓缩铀的不可或缺性，从而压低 Yes 冲高的概率。请明确说出你的判断依据和影响方向。
+
+## 输出要求
+
+只输出严格 JSON。
+
+必须包含：
+
+probability_yes_reaches_target.low
+probability_yes_reaches_target.mid
+probability_yes_reaches_target.high
+detailed_reasoning
+market_evidence
+news_evidence
+final_answer_one_sentence
+
+如果你没有给出这个概率，本次回答就是失败。
+如果你没有提供具体新闻证据，本次回答就是失败。
+如果你没有提供具体交易/盘口/历史价格证据，本次回答就是失败。
+如果你没有讨论铀的运输性和替代性，本次回答视为不够深入。
+
+不要输出 Markdown。
+不要输出免责声明。
+不要输出额外文字。
 """
 
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]
+        messages = [{"role": "system", "content": system_prompt.strip()}, {"role": "user", "content": user_message.strip()}]
         result = call_deepseek(deepseek_key, messages)
         return jsonify(result)
 
