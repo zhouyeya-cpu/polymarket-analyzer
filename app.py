@@ -24,7 +24,7 @@ def build_session():
 SESSION = build_session()
 
 # ============================================================
-# 工具函数：自动提取 Slug
+# 工具函数：从输入中提取 Polymarket Slug
 # ============================================================
 def extract_slug(input_str):
     if not input_str:
@@ -37,9 +37,9 @@ def extract_slug(input_str):
     return input_str
 
 # ============================================================
-# 新闻 API
+# 新闻 API（扩展时间窗口到 30 天）
 # ============================================================
-def get_news(token, theme="iran-me", window="7d", limit=100, q=None):
+def get_news(token, theme="iran-me", window="30d", limit=100, q=None):
     url = "https://news.ruilisi.com/api/v1/news"
     headers = {"Authorization": f"Bearer {token}"}
     params = {"theme": theme, "window": window, "limit": limit}
@@ -225,7 +225,7 @@ def summarize_trades(trades):
     }
 
 # ============================================================
-# DeepSeek 调用（适配旧版 openai）
+# DeepSeek 调用（适配旧版 openai，无代理问题）
 # ============================================================
 def call_deepseek(api_key, messages, max_retries=3):
     openai.api_key = api_key
@@ -252,7 +252,7 @@ def call_deepseek(api_key, messages, max_retries=3):
     raise ValueError(f"连续失败：{last_error}")
 
 # ============================================================
-# 前端 HTML（完整界面，含新增维度说明）
+# 前端 HTML（完整界面，含三大维度说明）
 # ============================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -450,6 +450,7 @@ def analyze():
     if not deepseek_key or not news_token or not raw_slug:
         return jsonify({"error": "缺少必要参数"}), 400
 
+    # 自动提取 slug（如果是完整 URL）
     event_slug = extract_slug(raw_slug)
 
     try:
@@ -478,14 +479,15 @@ def analyze():
         except:
             trade_summary = {"count": 0}
 
-        # 5. 新闻
+        # 5. 新闻（扩展时间窗口至 30 天，并放宽查询词）
         try:
-            news = get_news(news_token, q="Iran uranium nuclear")
+            news = get_news(news_token, window="30d", q="Iran nuclear uranium")
             news_text = format_news_for_prompt(news)
-        except:
+        except Exception as e:
+            print("新闻获取失败:", e)
             news_text = "新闻获取失败"
 
-        # 6. 构建 Prompt（包含运输性、替代性、群众情绪）
+        # 6. 构建 Prompt（包含三大维度）
         system_prompt = f"""
 你是一位预测市场分析师，专门分析 Polymarket 二元事件市场。
 
