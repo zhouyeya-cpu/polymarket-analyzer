@@ -283,11 +283,14 @@ PROVIDER_CONFIG = {
     }
 }
 
+# ============================================================
+# 修复：call_ai 重试逻辑，正确保存 final_answer
+# ============================================================
 def call_ai(provider, api_key, messages, custom_model=None, max_retries=3):
     cfg = PROVIDER_CONFIG.get(provider, PROVIDER_CONFIG["deepseek"])
     model = custom_model or cfg["model"]
     last_error = None
-    final_answer = ""
+    last_raw = ""  # FIXED: 保存最后一次的原始输出
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -296,6 +299,8 @@ def call_ai(provider, api_key, messages, custom_model=None, max_retries=3):
             else:
                 raw = call_openai_compatible(api_key, cfg["base_url"], model, messages)
 
+            last_raw = raw  # FIXED: 保存原始文本
+
             # 清理 markdown code fences
             clean = re.sub(r"```json\s*", "", raw)
             clean = re.sub(r"```\s*", "", clean).strip()
@@ -303,19 +308,27 @@ def call_ai(provider, api_key, messages, custom_model=None, max_retries=3):
 
             if "detailed_reasoning" not in data or len(data.get("detailed_reasoning", "")) < 200:
                 raise ValueError("推理太短，需要更多详细分析")
+
             return data
 
         except Exception as e:
             last_error = e
-            final_answer_local = final_answer if final_answer else ""
-            if attempt < max_retries:
-                messages = list(messages)
-                messages.append({"role": "assistant", "content": final_answer_local})
-                messages.append({"role": "user",
-                                 "content": f"上一个回答不合格：{e}。请重新输出严格 JSON，"
-                                            f"确保 detailed_reasoning 足够长且包含具体数据。不要输出 Markdown。"})
+            # FIXED: 将错误信息和上一次的输出（如果有）追加到消息中，以便 AI 修正
+            error_msg = f"上一次回答格式错误或内容不足。错误：{e}"
+            if last_raw:
+                # 截断，避免消息过长
+                truncated = last_raw[:500] + ("…" if len(last_raw) > 500 else "")
+                error_msg += f"\n上一次的原始输出（截断）：\n{truncated}"
+            # 更新消息列表，添加助手和用户的纠正提示
+            messages = list(messages)
+            messages.append({"role": "assistant", "content": last_raw if last_raw else "（空输出）"})
+            messages.append({"role": "user", "content": f"请根据以上错误重新输出严格的 JSON，确保 detailed_reasoning 足够长且包含具体数据。不要输出 Markdown。错误详情：{e}"})
+            # 如果已经是最后一次尝试，不再继续
+            if attempt == max_retries:
+                break
 
-    raise ValueError(f"AI 调用连续失败：{last_error}")
+    # 所有重试都失败
+    raise ValueError(f"AI 调用连续失败（重试 {max_retries} 次），最后错误：{last_error}")
 
 # ============================================================
 # Prompt 构建
@@ -453,7 +466,7 @@ No 当前价格: {pm_data['no_price']}
     ]
 
 # ============================================================
-# HTML 模板
+# HTML 模板（含前端修复）
 # ============================================================
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1042,7 +1055,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     document.getElementById('modelHint').textContent = `留空使用默认: ${h.model}`;
   }
 
-  // ── Analysis ──
+  // ── FIXED: 前端 fetch 处理，先读 text() 再尝试 JSON.parse ──
   async function runAnalysis() {
     const aiKey     = document.getElementById('aiKey').value.trim();
     const newsToken = document.getElementById('newsToken').value.trim();
@@ -1077,8 +1090,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         })
       });
 
-      const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || '分析失败');
+      // FIXED: 先读取文本，再尝试解析 JSON
+      const rawText = await res.text();
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseError) {
+        // 如果返回的是 HTML 错误页或空内容，显示原始内容（截断）
+        const preview = rawText.length > 500 ? rawText.slice(0, 500) + '…' : rawText;
+        throw new Error(`服务器返回非 JSON 内容。可能原因：网关超时或后端错误。\n原始内容预览：\n${preview}`);
+      }
+
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `请求失败 (HTTP ${res.status})`);
+      }
+
       renderResult(data);
     } catch (err) {
       showError('❌ ' + err.message);
