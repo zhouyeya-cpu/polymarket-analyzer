@@ -548,6 +548,137 @@ No 当前价格: {pm_data['no_price']}
         {"role": "user", "content": user_message.strip()}
     ]
 
+
+def build_custom_question_prompts(pm_data, yes_orderbook_summary, no_orderbook_summary,
+                                  yes_price_history_summary, no_price_history_summary,
+                                  trade_summary, news_text, custom_question):
+    """
+    自定义问题模式：用户自己输入想预测的问题。
+    输出仍保持与前端兼容的 JSON 结构，probability_reaches_target 表示“模型对用户问题核心判断成立的概率/信心”。
+    """
+    system_prompt = """你是一位预测市场分析师，专门分析 Polymarket 二元事件市场。
+
+你的核心任务是回答用户的自定义预测问题。用户问题可能是：
+- Yes 会不会涨？
+- No 会不会涨？
+- 是否应该买 Yes / No？
+- 某个价格目标是否会触及？
+- 某条新闻对价格有什么影响？
+- 事件最终更可能 Yes 还是 No？
+
+你必须结合 Polymarket 市场数据、Yes/No 当前价格、Yes/No 订单簿、历史价格、成交记录和新闻证据回答。
+
+你必须输出严格 JSON，不要输出 Markdown，不要输出免责声明，不要输出多余解释。
+
+JSON 必须包含以下字段：
+{
+  "prediction_type": "custom_question",
+  "custom_question": "用户原始问题",
+  "probability_reaches_target": {
+    "low": 数字,
+    "mid": 数字,
+    "high": 数字,
+    "unit": "%"
+  },
+  "current_market": {
+    "yes_price": 数字,
+    "no_price": 数字,
+    "analyzed_outcome": "Custom",
+    "analyzed_price": 数字或 null,
+    "target_price": 数字或 null,
+    "volume": 数字,
+    "orderbook_summary": "字符串"
+  },
+  "decision": {
+    "action": "buy_yes / buy_no / wait / avoid / scale_in / hold / custom",
+    "reason": "字符串",
+    "entry_plan": "字符串"
+  },
+  "price_triggers": {
+    "consider_buy_below": 数字或 null,
+    "neutral_zone": "字符串",
+    "avoid_chasing_above": 数字或 null
+  },
+  "market_evidence": [
+    {
+      "evidence": "字符串，必须包含具体数字",
+      "impact_on_target_outcome_reaches_target": "positive / negative / neutral",
+      "explanation": "字符串，至少80个中文字"
+    }
+  ],
+  "news_evidence": [
+    {
+      "news_id": "N1",
+      "title": "字符串",
+      "source": "字符串",
+      "published_at": "字符串",
+      "impact_on_target_outcome_reaches_target": "positive / negative / neutral",
+      "explanation": "字符串，至少100个中文字"
+    }
+  ],
+  "key_risks": ["字符串"],
+  "detailed_reasoning": "不少于500个中文字的详细推理，必须直接回答用户自定义问题",
+  "final_answer_one_sentence": "字符串"
+}
+
+硬性要求：
+1. probability_reaches_target.low/mid/high 必须存在。若用户问题是概率问题，则这里表示该问题成立的概率；若用户问题是交易建议，则这里表示该建议正确/占优的信心区间。
+2. market_evidence 至少 5 条，每条必须引用具体数字。
+3. news_evidence 至少 5 条，每条必须引用 N 编号；如果新闻不足 5 条，也要尽量引用可用新闻并说明不足。
+4. detailed_reasoning 不少于 500 个中文字。
+5. 必须明确回答用户自定义问题，不要只套模板。
+6. 必须分析 Yes 与 No 的联动、订单簿、历史价格、成交结构、群众情绪和新闻催化剂。
+"""
+
+    user_message = f"""## 用户自定义预测问题
+
+{custom_question}
+
+## Polymarket 市场数据
+
+事件: {pm_data.get('question', '')}
+Yes 当前价格: {pm_data.get('yes_price')}
+No 当前价格: {pm_data.get('no_price')}
+总交易量: {float(pm_data.get('volume', 0) or 0)}
+到期日: {pm_data.get('end_date', '未知')}
+规则/描述: {pm_data.get('description', '无')}
+
+## Yes 订单簿摘要
+
+{json.dumps(yes_orderbook_summary, ensure_ascii=False, default=str, indent=2)}
+
+## No 订单簿摘要
+
+{json.dumps(no_orderbook_summary, ensure_ascii=False, default=str, indent=2)}
+
+## Yes 历史价格摘要
+
+{json.dumps(yes_price_history_summary, ensure_ascii=False, default=str, indent=2)}
+
+## No 历史价格摘要
+
+{json.dumps(no_price_history_summary, ensure_ascii=False, default=str, indent=2)}
+
+## 成交记录摘要
+
+{json.dumps(trade_summary, ensure_ascii=False, default=str, indent=2)}
+
+## 相关新闻证据
+
+下面每条新闻都有编号，你必须在 news_evidence 中引用这些编号（N1、N2…）。
+
+{news_text}
+
+## 输出要求
+
+只输出严格 JSON，不要输出 Markdown，不要输出免责声明，不要输出额外文字。
+"""
+
+    return [
+        {"role": "system", "content": system_prompt.strip()},
+        {"role": "user", "content": user_message.strip()}
+    ]
+
 # ============================================================
 # HTML 模板（含前端修复）
 # ============================================================
@@ -648,7 +779,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     letter-spacing: 0.04em; text-transform: uppercase;
   }
 
-  input, select {
+  input, select, textarea {
     background: var(--surface2);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -660,12 +791,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     outline: none;
     width: 100%;
   }
-  input:focus, select:focus {
+  input:focus, select:focus, textarea:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(0,212,170,0.12);
   }
   input[type="password"] { font-family: var(--mono); letter-spacing: 0.05em; }
-  input::placeholder { color: var(--text3); }
+  input::placeholder, textarea::placeholder { color: var(--text3); }
+  textarea { resize: vertical; min-height: 92px; line-height: 1.55; }
   select option { background: var(--surface2); }
 
   .field-hint { font-size: 0.73rem; color: var(--text3); }
@@ -999,18 +1131,25 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="field">
-        <label>分析方向</label>
-        <select id="analysisDirection">
-          <option value="yes" selected>Yes 涨到目标价</option>
-          <option value="no">No 涨到目标价</option>
+        <label>预测类型</label>
+        <select id="predictionType" onchange="handlePredictionTypeChange()">
+          <option value="yes_price_up" selected>Yes 涨概率</option>
+          <option value="no_price_up">No 涨概率</option>
+          <option value="custom_question">自定义问题</option>
         </select>
-        <span class="field-hint">选择要计算 Yes 涨，还是 No 涨</span>
+        <span class="field-hint">顾客只需要选择想预测的类型</span>
       </div>
 
-      <div class="field">
+      <div class="field" id="targetPriceField">
         <label>目标价格（Threshold）</label>
         <input type="number" id="targetPrice" value="0.60" step="0.01" min="0.01" max="0.99" />
-        <span class="field-hint">例如 0.60 表示预测所选方向涨到 60¢ 的概率</span>
+        <span class="field-hint">例如 0.60 表示预测 Yes/No 涨到 60¢ 的概率</span>
+      </div>
+
+      <div class="field full" id="customQuestionField" style="display:none;">
+        <label>自定义问题</label>
+        <textarea id="customQuestion" placeholder="例如：只看涨幅，当前应该买 Yes 还是 No？或者：No 有没有机会从 0.17 涨到 0.30？"></textarea>
+        <span class="field-hint">系统会结合 Yes/No 盘口、历史价格、成交记录和新闻来回答</span>
       </div>
 
       <div class="field">
@@ -1147,19 +1286,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     document.getElementById('modelHint').textContent = `留空使用默认: ${h.model}`;
   }
 
+  function handlePredictionTypeChange() {
+    const predictionType = document.getElementById('predictionType').value;
+    const isCustom = predictionType === 'custom_question';
+    document.getElementById('customQuestionField').style.display = isCustom ? 'flex' : 'none';
+    document.getElementById('targetPriceField').style.display = isCustom ? 'none' : 'flex';
+  }
+
   // ── FIXED: 前端 fetch 处理，先读 text() 再尝试 JSON.parse ──
   async function runAnalysis() {
     const aiKey     = document.getElementById('aiKey').value.trim();
     const newsToken = document.getElementById('newsToken').value.trim();
     const event     = document.getElementById('eventInput').value.trim();
     const target    = parseFloat(document.getElementById('targetPrice').value);
-    const direction = document.getElementById('analysisDirection').value;
+    const predictionType = document.getElementById('predictionType').value;
+    const direction = predictionType === 'no_price_up' ? 'no' : 'yes';
+    const customQuestion = document.getElementById('customQuestion').value.trim();
     const model     = document.getElementById('customModel').value.trim();
     const newsWin   = document.getElementById('newsWindow').value;
     const newsQ     = document.getElementById('newsQuery').value.trim();
 
     if (!aiKey || !newsToken || !event) {
       showError('请填写 AI API Key、News Token 和 Polymarket 事件。');
+      return;
+    }
+    if (predictionType === 'custom_question' && !customQuestion) {
+      showError('请选择“自定义问题”时，需要填写你想预测的问题。');
       return;
     }
 
@@ -1178,7 +1330,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           news_token: newsToken,
           event_slug: event,
           target_price: target,
+          prediction_type: predictionType,
           analysis_direction: direction,
+          custom_question: customQuestion || null,
           news_window: newsWin,
           news_query: newsQ || null
         })
@@ -1324,7 +1478,24 @@ def analyze():
         raw_slug     = data.get('event_slug')
         news_window  = data.get('news_window', '30d')
         news_query   = data.get('news_query')
+        prediction_type = str(data.get('prediction_type') or '').lower().strip()
+        custom_question = str(data.get('custom_question') or '').strip()
+
+        # 兼容旧前端：如果没有 prediction_type，就按 analysis_direction 走旧逻辑
         analysis_direction = str(data.get('analysis_direction', 'yes')).lower().strip()
+        if not prediction_type:
+            prediction_type = 'no_price_up' if analysis_direction == 'no' else 'yes_price_up'
+
+        if prediction_type not in ('yes_price_up', 'no_price_up', 'custom_question'):
+            return json_error("prediction_type 只能是 yes_price_up / no_price_up / custom_question。", 400)
+
+        if prediction_type == 'yes_price_up':
+            analysis_direction = 'yes'
+        elif prediction_type == 'no_price_up':
+            analysis_direction = 'no'
+        elif prediction_type == 'custom_question' and not custom_question:
+            return json_error("自定义问题模式下 custom_question 不能为空。", 400)
+
         if analysis_direction not in ('yes', 'no'):
             return json_error("analysis_direction 只能是 yes 或 no。", 400)
 
@@ -1348,47 +1519,95 @@ def analyze():
         no_token     = pm_data.get("no_token_id")
         condition_id = pm_data.get("condition_id")
 
-        selected_token = yes_token if analysis_direction == "yes" else no_token
-        selected_price_key = f"{analysis_direction}_price"
-        selected_label = "Yes" if analysis_direction == "yes" else "No"
+        # 2-6. 根据预测类型构建数据与 Prompt
+        if prediction_type == "custom_question":
+            # 自定义问题需要同时提供 Yes / No 两边的数据，方便用户问任意方向
+            yes_orderbook_summary = {"error": "missing yes token"}
+            no_orderbook_summary = {"error": "missing no token"}
+            yes_price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False}
+            no_price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False}
 
-        if not selected_token:
-            return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} token_id。请确认 slug 是具体 market slug。", 502)
-        if pm_data.get(selected_price_key) is None:
-            return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} 价格。", 502)
+            if yes_token:
+                try:
+                    yes_book = get_orderbook(yes_token)
+                    yes_orderbook_summary = summarize_orderbook(yes_book.get("bids", []), yes_book.get("asks", []), 0.90)
+                except Exception as e:
+                    yes_orderbook_summary = {"error": str(e)}
+                try:
+                    yes_price_history_summary = summarize_price_history(get_price_history(yes_token), 0.90)
+                except Exception as e:
+                    yes_price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False, "error": str(e)}
 
-        # 2. 订单簿：按照所选方向 Yes / No 获取对应 token 的盘口
-        orderbook = get_orderbook(selected_token)
-        orderbook_summary = summarize_orderbook(
-            orderbook.get("bids", []), orderbook.get("asks", []), target_price
-        )
+            if no_token:
+                try:
+                    no_book = get_orderbook(no_token)
+                    no_orderbook_summary = summarize_orderbook(no_book.get("bids", []), no_book.get("asks", []), 0.50)
+                except Exception as e:
+                    no_orderbook_summary = {"error": str(e)}
+                try:
+                    no_price_history_summary = summarize_price_history(get_price_history(no_token), 0.50)
+                except Exception as e:
+                    no_price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False, "error": str(e)}
 
-        # 3. 历史价格：按照所选方向 Yes / No 获取对应 token 的历史价格
-        try:
-            price_history = get_price_history(selected_token)
-            price_history_summary = summarize_price_history(price_history, target_price)
-        except Exception as e:
-            price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False, "error": str(e)}
+            try:
+                trade_summary = summarize_trades(get_trade_history(condition_id, limit=500)) if condition_id else {"count": 0, "error": "missing condition_id"}
+            except Exception as e:
+                trade_summary = {"count": 0, "error": str(e)}
 
-        # 4. 交易记录：失败不终止主流程
-        try:
-            trade_summary = summarize_trades(get_trade_history(condition_id, limit=500)) if condition_id else {"count": 0, "error": "missing condition_id"}
-        except Exception as e:
-            trade_summary = {"count": 0, "error": str(e)}
+            try:
+                news = get_news(news_token, window=news_window, q=news_query or pm_data.get("question") or "Polymarket")
+                news_text = format_news_for_prompt(news)
+            except Exception as e:
+                news_text = f"新闻获取失败：{e}"
 
-        # 5. 新闻：失败不终止主流程
-        try:
-            news = get_news(news_token, window=news_window, q=news_query or "Iran nuclear uranium")
-            news_text = format_news_for_prompt(news)
-        except Exception as e:
-            news_text = f"新闻获取失败：{e}"
+            messages = build_custom_question_prompts(
+                pm_data, yes_orderbook_summary, no_orderbook_summary,
+                yes_price_history_summary, no_price_history_summary,
+                trade_summary, news_text, custom_question
+            )
 
-        # 6. 构建 Prompt
-        messages = build_prompts(
-            pm_data, orderbook_summary, price_history_summary,
-            trade_summary, news_text, target_price,
-            direction=analysis_direction
-        )
+        else:
+            selected_token = yes_token if analysis_direction == "yes" else no_token
+            selected_price_key = f"{analysis_direction}_price"
+            selected_label = "Yes" if analysis_direction == "yes" else "No"
+
+            if not selected_token:
+                return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} token_id。请确认 slug 是具体 market slug。", 502)
+            if pm_data.get(selected_price_key) is None:
+                return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} 价格。", 502)
+
+            # 订单簿：按照所选方向 Yes / No 获取对应 token 的盘口
+            orderbook = get_orderbook(selected_token)
+            orderbook_summary = summarize_orderbook(
+                orderbook.get("bids", []), orderbook.get("asks", []), target_price
+            )
+
+            # 历史价格：按照所选方向 Yes / No 获取对应 token 的历史价格
+            try:
+                price_history = get_price_history(selected_token)
+                price_history_summary = summarize_price_history(price_history, target_price)
+            except Exception as e:
+                price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False, "error": str(e)}
+
+            # 交易记录：失败不终止主流程
+            try:
+                trade_summary = summarize_trades(get_trade_history(condition_id, limit=500)) if condition_id else {"count": 0, "error": "missing condition_id"}
+            except Exception as e:
+                trade_summary = {"count": 0, "error": str(e)}
+
+            # 新闻：失败不终止主流程
+            try:
+                news = get_news(news_token, window=news_window, q=news_query or "Iran nuclear uranium")
+                news_text = format_news_for_prompt(news)
+            except Exception as e:
+                news_text = f"新闻获取失败：{e}"
+
+            # 构建 Prompt
+            messages = build_prompts(
+                pm_data, orderbook_summary, price_history_summary,
+                trade_summary, news_text, target_price,
+                direction=analysis_direction
+            )
 
         # 7. 调用 AI
         result = call_ai(provider, ai_key, messages, custom_model=custom_model)
@@ -1397,9 +1616,12 @@ def analyze():
             legacy_key = f"probability_{analysis_direction}_reaches_target"
             if legacy_key in result:
                 result["probability_reaches_target"] = result[legacy_key]
-        result["analysis_direction"] = analysis_direction
-        result["analyzed_outcome"] = "Yes" if analysis_direction == "yes" else "No"
-        result["target_price"] = target_price
+        result["prediction_type"] = prediction_type
+        result["analysis_direction"] = analysis_direction if prediction_type != "custom_question" else "custom"
+        result["analyzed_outcome"] = "Custom" if prediction_type == "custom_question" else ("Yes" if analysis_direction == "yes" else "No")
+        result["target_price"] = target_price if prediction_type != "custom_question" else result.get("target_price")
+        if prediction_type == "custom_question":
+            result["custom_question"] = custom_question
         return jsonify(result)
 
     except requests.exceptions.Timeout as e:
