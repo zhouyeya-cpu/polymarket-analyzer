@@ -395,26 +395,39 @@ def call_ai(provider, api_key, messages, custom_model=None, max_retries=2):
 # ============================================================
 # Prompt 构建
 # ============================================================
-def build_prompts(pm_data, orderbook_summary, price_history_summary, trade_summary, news_text, target_price):
-    current_yes = pm_data["yes_price"] or 0
-    required_gain_pct = ((target_price / current_yes - 1) * 100) if current_yes else None
+def build_prompts(pm_data, orderbook_summary, price_history_summary, trade_summary, news_text, target_price, direction="yes"):
+    """
+    direction = "yes" 或 "no"
+    用同一套逻辑分析：P(某个 outcome 价格在结束前达到或超过 target_price)
+    """
+    direction = str(direction or "yes").lower().strip()
+    if direction not in ("yes", "no"):
+        direction = "yes"
+
+    outcome_name = "Yes" if direction == "yes" else "No"
+    opposite_name = "No" if direction == "yes" else "Yes"
+
+    current_price = pm_data.get(f"{direction}_price") or 0
+    opposite_price = pm_data.get("no_price" if direction == "yes" else "yes_price") or 0
+    required_gain_pct = ((target_price / current_price - 1) * 100) if current_price else None
 
     system_prompt = f"""你是一位预测市场分析师，专门分析 Polymarket 二元事件市场。
 
 你的核心任务是回答：
 
-P(Yes 价格在该市场结束前达到或超过 {target_price} 美元) 是多少？
+P({outcome_name} 价格在该市场结束前达到或超过 {target_price} 美元) 是多少？
 
 注意：
-这不是问事件最终是否 Yes 结算。
-这是问 Yes 市场价格是否会涨到 >= {target_price}。
+这不是问事件最终是否 {outcome_name} 结算。
+这是问 {outcome_name} 市场价格是否会涨到 >= {target_price}。
 
 你必须输出严格 JSON，不要输出 Markdown，不要输出免责声明，不要输出多余解释。
 
 JSON 必须包含以下字段：
 
 {{
-  "probability_yes_reaches_target": {{
+  "analysis_direction": "{direction}",
+  "probability_reaches_target": {{
     "low": 数字,
     "mid": 数字,
     "high": 数字,
@@ -423,6 +436,9 @@ JSON 必须包含以下字段：
   "current_market": {{
     "yes_price": 数字,
     "no_price": 数字,
+    "analyzed_outcome": "{outcome_name}",
+    "analyzed_price": 数字,
+    "target_price": 数字,
     "volume": 数字,
     "orderbook_summary": "字符串"
   }},
@@ -439,7 +455,7 @@ JSON 必须包含以下字段：
   "market_evidence": [
     {{
       "evidence": "字符串，必须包含具体数字",
-      "impact_on_yes_reaches_target": "positive / negative / neutral",
+      "impact_on_target_outcome_reaches_target": "positive / negative / neutral",
       "explanation": "字符串，至少80个中文字"
     }}
   ],
@@ -449,7 +465,7 @@ JSON 必须包含以下字段：
       "title": "字符串",
       "source": "字符串",
       "published_at": "字符串",
-      "impact_on_yes_reaches_target": "positive / negative / neutral",
+      "impact_on_target_outcome_reaches_target": "positive / negative / neutral",
       "explanation": "字符串，至少100个中文字"
     }}
   ],
@@ -459,46 +475,50 @@ JSON 必须包含以下字段：
 }}
 
 硬性要求：
-1. probability_yes_reaches_target.low/mid/high 必须存在，mid 为 0-100 之间数字。
+1. probability_reaches_target.low/mid/high 必须存在，mid 为 0-100 之间数字。
 2. market_evidence 至少 5 条，每条必须引用具体数字。
 3. news_evidence 至少 5 条，每条必须引用 N 编号。
 4. detailed_reasoning 不少于 500 个中文字。
 5. 不允许只说空话，必须引用具体数据和新闻。
-6. 必须区分：事件最终Yes结算概率、当前价格隐含概率、Yes价格触及{target_price}的概率。
+6. 必须区分：事件最终 {outcome_name} 结算概率、当前价格隐含概率、{outcome_name} 价格触及 {target_price} 的概率。
 7. 必须分析群众情绪（FOMO/基本面/对冲）和市场微结构（订单簿/大单/VWAP）。
+8. 你现在分析的是 {outcome_name} 涨价，不是默认分析 Yes；新闻影响方向必须站在 {outcome_name} 价格触及目标价的角度判断。
 """
 
     user_message = f"""## 核心问题
 
-请估计：P(Yes 价格在该市场结束前达到或超过 {target_price} 美元)
+请估计：P({outcome_name} 价格在该市场结束前达到或超过 {target_price} 美元)
 
-当前 Yes 价格是 {pm_data['yes_price']:.3f}（即 {pm_data['yes_price'] * 100:.1f}%）。
-目标价格是 {target_price}，需要上涨约 {required_gain_pct:.1f}%。
+当前 {outcome_name} 价格是 {current_price:.3f}（即 {current_price * 100:.1f}%）。
+当前 {opposite_name} 价格是 {opposite_price:.3f}（即 {opposite_price * 100:.1f}%）。
+目标价格是 {target_price}，{outcome_name} 需要上涨约 {required_gain_pct:.1f}%。
 
 ## Polymarket 市场数据
 
 事件: {pm_data['question']}
 Yes 当前价格: {pm_data['yes_price']}
 No 当前价格: {pm_data['no_price']}
+本次分析方向: {outcome_name}
+本次分析价格: {current_price}
 总交易量: {float(pm_data.get('volume', 0))}
 到期日: {pm_data.get('end_date', '未知')}
 规则/描述: {pm_data.get('description', '无')}
 
-## 订单簿摘要
+## {outcome_name} 订单簿摘要
 
 {json.dumps(orderbook_summary, ensure_ascii=False, default=str, indent=2)}
 
 请分析：
-1. 是否容易被小额资金推到 {target_price}；
+1. {outcome_name} 是否容易被小额资金推到 {target_price}；
 2. {target_price} 附近是否有较强卖压；
 3. 当前 spread 是否说明流动性不足；
 4. 从当前价格到 {target_price} 需要多强的买盘推动。
 
-## 历史价格摘要
+## {outcome_name} 历史价格摘要
 
 {json.dumps(price_history_summary, ensure_ascii=False, default=str, indent=2)}
 
-## 交易记录摘要
+## 成交记录摘要
 
 {json.dumps(trade_summary, ensure_ascii=False, default=str, indent=2)}
 
@@ -510,12 +530,13 @@ No 当前价格: {pm_data['no_price']}
 
 ## 分析要求
 
-1. 价格距离分析：当前 {pm_data['yes_price']:.3f} → 目标 {target_price}，需涨 {required_gain_pct:.1f}%，是否符合历史波动。
-2. 历史价格：是否曾接近或超过 {target_price}。
+1. 价格距离分析：当前 {current_price:.3f} → 目标 {target_price}，需涨 {required_gain_pct:.1f}%，是否符合历史波动。
+2. 历史价格：{outcome_name} 是否曾接近或超过 {target_price}。
 3. 订单簿：盘口厚度、成本估算、能否被资金推高。
 4. 成交分析：成交方向、大单分布、VWAP 与目标价关系。
-5. 新闻分析：至少引用 5 条 N 编号新闻，说明每条对"Yes 价格触及 {target_price}"的影响方向。
+5. 新闻分析：至少引用 5 条 N 编号新闻，说明每条对“{outcome_name} 价格触及 {target_price}”的影响方向。
 6. 群众情绪：FOMO、投机、基本面支撑、对冲需求，情绪能否持续到触及目标价。
+7. 因为二元市场 Yes + No 通常接近 1，必须说明 {opposite_name} 下跌与 {outcome_name} 上涨之间的联动。
 
 ## 输出要求
 
@@ -916,7 +937,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="header-desc">
       输入你的 AI API 密钥、新闻令牌和 Polymarket 事件，系统将融合订单簿、历史价格、成交记录与新闻情报，
-      量化评估 Yes 价格触及目标阈值的概率。
+      量化评估 Yes 或 No 价格触及目标阈值的概率。
     </div>
   </div>
 </div>
@@ -978,9 +999,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
 
       <div class="field">
-        <label>目标 Yes 价格（Threshold）</label>
+        <label>分析方向</label>
+        <select id="analysisDirection">
+          <option value="yes" selected>Yes 涨到目标价</option>
+          <option value="no">No 涨到目标价</option>
+        </select>
+        <span class="field-hint">选择要计算 Yes 涨，还是 No 涨</span>
+      </div>
+
+      <div class="field">
+        <label>目标价格（Threshold）</label>
         <input type="number" id="targetPrice" value="0.60" step="0.01" min="0.01" max="0.99" />
-        <span class="field-hint">例如 0.60 表示预测 Yes 涨到 60¢ 的概率</span>
+        <span class="field-hint">例如 0.60 表示预测所选方向涨到 60¢ 的概率</span>
       </div>
 
       <div class="field">
@@ -1008,7 +1038,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Probability hero -->
     <div class="prob-hero">
-      <div class="prob-label">P( Yes ≥ 目标价 ) 概率区间</div>
+      <div class="prob-label">P(所选方向 ≥ 目标价) 概率区间</div>
       <div class="prob-numbers">
         <div class="prob-item">
           <div class="pl">悲观估计</div>
@@ -1123,6 +1153,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const newsToken = document.getElementById('newsToken').value.trim();
     const event     = document.getElementById('eventInput').value.trim();
     const target    = parseFloat(document.getElementById('targetPrice').value);
+    const direction = document.getElementById('analysisDirection').value;
     const model     = document.getElementById('customModel').value.trim();
     const newsWin   = document.getElementById('newsWindow').value;
     const newsQ     = document.getElementById('newsQuery').value.trim();
@@ -1147,6 +1178,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           news_token: newsToken,
           event_slug: event,
           target_price: target,
+          analysis_direction: direction,
           news_window: newsWin,
           news_query: newsQ || null
         })
@@ -1176,7 +1208,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   }
 
   function renderResult(data) {
-    const prob = data.probability_yes_reaches_target || {};
+    const prob = data.probability_reaches_target || data.probability_yes_reaches_target || data.probability_no_reaches_target || {};
     document.getElementById('probLow').textContent  = fmt(prob.low)  + '%';
     document.getElementById('probMid').textContent  = fmt(prob.mid)  + '%';
     document.getElementById('probHigh').textContent = fmt(prob.high) + '%';
@@ -1217,7 +1249,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const el = document.getElementById(containerId);
     el.innerHTML = '';
     items.forEach((item, i) => {
-      const impact = item.impact_on_yes_reaches_target || 'neutral';
+      const impact = item.impact_on_target_outcome_reaches_target || item.impact_on_yes_reaches_target || item.impact_on_no_reaches_target || 'neutral';
       const cls = { positive:'positive', negative:'negative', neutral:'neutral' }[impact] || 'neutral';
       const card = document.createElement('div'); card.className = 'ev-card';
       if (type === 'news') {
@@ -1292,6 +1324,9 @@ def analyze():
         raw_slug     = data.get('event_slug')
         news_window  = data.get('news_window', '30d')
         news_query   = data.get('news_query')
+        analysis_direction = str(data.get('analysis_direction', 'yes')).lower().strip()
+        if analysis_direction not in ('yes', 'no'):
+            return json_error("analysis_direction 只能是 yes 或 no。", 400)
 
         try:
             target_price = float(data.get('target_price', 0.60))
@@ -1310,21 +1345,27 @@ def analyze():
         # 1. Polymarket 数据
         pm_data = get_polymarket_data(event_slug)
         yes_token    = pm_data.get("yes_token_id")
+        no_token     = pm_data.get("no_token_id")
         condition_id = pm_data.get("condition_id")
-        if not yes_token:
-            return json_error("没有从 Polymarket 市场数据中取到 yes_token_id。请确认 slug 是具体 market slug。", 502)
-        if pm_data.get("yes_price") is None:
-            return json_error("没有从 Polymarket 市场数据中取到 Yes 价格。", 502)
 
-        # 2. 订单簿
-        orderbook = get_orderbook(yes_token)
+        selected_token = yes_token if analysis_direction == "yes" else no_token
+        selected_price_key = f"{analysis_direction}_price"
+        selected_label = "Yes" if analysis_direction == "yes" else "No"
+
+        if not selected_token:
+            return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} token_id。请确认 slug 是具体 market slug。", 502)
+        if pm_data.get(selected_price_key) is None:
+            return json_error(f"没有从 Polymarket 市场数据中取到 {selected_label} 价格。", 502)
+
+        # 2. 订单簿：按照所选方向 Yes / No 获取对应 token 的盘口
+        orderbook = get_orderbook(selected_token)
         orderbook_summary = summarize_orderbook(
             orderbook.get("bids", []), orderbook.get("asks", []), target_price
         )
 
-        # 3. 历史价格：失败不终止主流程
+        # 3. 历史价格：按照所选方向 Yes / No 获取对应 token 的历史价格
         try:
-            price_history = get_price_history(yes_token)
+            price_history = get_price_history(selected_token)
             price_history_summary = summarize_price_history(price_history, target_price)
         except Exception as e:
             price_history_summary = {"count": 0, "latest_price": None, "ever_reached_target": False, "error": str(e)}
@@ -1345,11 +1386,20 @@ def analyze():
         # 6. 构建 Prompt
         messages = build_prompts(
             pm_data, orderbook_summary, price_history_summary,
-            trade_summary, news_text, target_price
+            trade_summary, news_text, target_price,
+            direction=analysis_direction
         )
 
         # 7. 调用 AI
         result = call_ai(provider, ai_key, messages, custom_model=custom_model)
+        # 兼容旧前端/旧 Prompt：统一补充通用字段
+        if "probability_reaches_target" not in result:
+            legacy_key = f"probability_{analysis_direction}_reaches_target"
+            if legacy_key in result:
+                result["probability_reaches_target"] = result[legacy_key]
+        result["analysis_direction"] = analysis_direction
+        result["analyzed_outcome"] = "Yes" if analysis_direction == "yes" else "No"
+        result["target_price"] = target_price
         return jsonify(result)
 
     except requests.exceptions.Timeout as e:
